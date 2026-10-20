@@ -4,17 +4,76 @@ import {
   ArrowLeft, ArrowRight, BarChart3, BookOpenText, Check, CheckCircle2, ChevronDown,
   Clock3, FileClock, FileText, GraduationCap, Home, ImagePlus, Info, LayoutDashboard,
   ListChecks, Menu, RotateCcw, Save, Search, Send, Settings2, Sparkles, SquarePen,
-  Timer, Trash2, Upload, X, ZoomIn,
+  Timer, Trash2, Upload, X, ZoomIn, FilePlus2, LibraryBig, ShieldCheck, UserRoundCog,
 } from 'lucide-vue-next'
 import ModalShell from './components/ModalShell.vue'
 import ImageImportModal from './components/ImageImportModal.vue'
 import QuestionChart from './components/QuestionChart.vue'
 import ProgressDashboard from './components/ProgressDashboard.vue'
 import ResultsFeedback from './components/ResultsFeedback.vue'
-import { defaultQuestion, formatTime, questionBank, questionsFor, wordCount } from './data/questions.js'
+import QuestionSuggestion from './components/QuestionSuggestion.vue'
+import QuestionBankAdmin from './components/QuestionBankAdmin.vue'
+import QuestionBankStudent from './components/QuestionBankStudent.vue'
+import SuggestionReviewAdmin from './components/SuggestionReviewAdmin.vue'
+import { seedManagedQuestions } from './data/questionManagement.js'
+import { formatTime, questionBank, wordCount } from './data/questions.js'
+
+const QUESTIONS_STORAGE = 'ielts-aes-questions-demo-v1'
+const demoRole = ref('student') // Frontend role switch; this is NOT authentication/authorization.
+const managedQuestions = ref(seedManagedQuestions())
+const suggestions = ref([
+  { id:'suggestion-demo-1', task:2, topic:'Technology', source:'Original idea', question:'Some people believe that artificial intelligence will create more opportunities for workers, while others think it will lead to widespread unemployment. Discuss both views and give your opinion.', visual:null, visualNotes:'', status:'pending', submittedBy:'Demo Student', submittedAt:new Date(Date.now()-86400000).toISOString(), isSample:true },
+  { id:'suggestion-demo-2', task:1, topic:'Environment', source:'Original idea', question:'The line graph shows the percentage of households using solar energy in three different regions from 2010 to 2025. Summarise the information by selecting and reporting the main features, and make comparisons where relevant.', visual:null, visualNotes:'Line graph showing three regions, years 2010–2025, and household percentages.', status:'pending', submittedBy:'Demo Student', submittedAt:new Date(Date.now()-2*86400000).toISOString(), isSample:true },
+])
+const activeBank = computed(() => managedQuestions.value.filter(q => q.status === 'active'))
+const questionsForTask = number => activeBank.value.filter(q => q.task === number)
+function createDemoId(prefix) { return `${prefix}-${Date.now()}-${Math.floor(Math.random()*100000)}` }
+function submitQuestionSuggestion(fields) {
+  suggestions.value.unshift({ ...fields, id:createDemoId('suggestion'), status:'pending', submittedBy:'Demo Student', submittedAt:new Date().toISOString(), reviewedAt:null, reviewedBy:null, reason:'' })
+  persistQuestions()
+}
+function saveManagedQuestion(item) {
+  const now = new Date().toISOString()
+  const old = managedQuestions.value.find(q => q.id === item.id)
+  if (old) Object.assign(old, { ...item, id:old.id, createdAt:old.createdAt, updatedAt:now, suggestionId:old.suggestionId, title:item.question.slice(0,54) })
+  else managedQuestions.value.unshift({ ...item, id:createDemoId('question'), title:item.question.slice(0,54), createdAt:now, updatedAt:now, suggestionId:null })
+  persistQuestions()
+}
+function changeQuestionStatus({ id, status }) {
+  const item=managedQuestions.value.find(q=>q.id===id)
+  if (item) {item.status=status; item.updatedAt=new Date().toISOString(); persistQuestions()}
+}
+function archiveQuestion(id) { changeQuestionStatus({id,status:'archived'}) }
+function approveSuggestion(id) {
+  const q=suggestions.value.find(s=>s.id===id)
+  if (!q || q.status!=='pending') return
+  const now=new Date().toISOString()
+  // One locally synchronous demo operation: review decision and draft created together.
+  managedQuestions.value.unshift({id:createDemoId('question'),task:q.task,question:q.question,topic:q.topic,source:q.source||'Learner suggestion',visual:q.visual,visualNotes:q.visualNotes,status:'draft',suggestionId:q.id,createdAt:now,updatedAt:now,title:q.question.slice(0,54)})
+  q.status='approved';q.reviewedAt=now;q.reviewedBy='Demo Admin';q.reason=''
+  persistQuestions()
+}
+function rejectSuggestion({id,reason}) {
+  const q=suggestions.value.find(s=>s.id===id)
+  if (!q || q.status!=='pending') return
+  q.status='rejected';q.reason=reason;q.reviewedAt=new Date().toISOString();q.reviewedBy='Demo Admin'
+  persistQuestions()
+}
+function persistQuestions() {
+  try { localStorage.setItem(QUESTIONS_STORAGE, JSON.stringify({questions:managedQuestions.value,suggestions:suggestions.value})) }
+  catch (error) {toast('Browser storage is full. Some question-management changes may not persist after refresh.')}
+}
+function setDemoRole(event) {
+  const next = event.target.value
+  if (next === demoRole.value) return
+  if (!leaveMockIfNecessary(next==='admin'?'question-bank':'practice')) {event.target.value=demoRole.value;return}
+  demoRole.value=next
+  navigate(next === 'admin'?'question-bank':'practice')
+  toast(next==='admin'?'Admin demo view: not secured by real authentication.':'Switched to learner demo view.')
+}
 
 const STORAGE = 'ielts-aes-ui-prototype-v1'
-function blankDraft() { return { question: '', essay: '', visual: null, questionSource: 'custom' } }
+function blankDraft() { return { question: '', essay: '', visual: null, questionSource: 'custom', questionId: null } }
 const practiceDrafts = reactive({ 1: blankDraft(), 2: blankDraft() })
 const practiceTask = ref(1)
 const mockTask = ref(1)
@@ -43,7 +102,7 @@ function toast(text) {
   toastTimeout = window.setTimeout(() => { notice.value = '' }, 4200)
 }
 
-const modal = ref('') // timer | bank | zoom | improvement | clear
+const modal = ref('') // timer | zoom | improvement | clear
 const importTarget = ref(null)
 const feedbackTab = ref('task')
 const mockStarted = ref(false)
@@ -99,6 +158,9 @@ onMounted(() => {
       if (state.drafts?.[number]) Object.assign(practiceDrafts[number], state.drafts[number])
     }
     if (Array.isArray(state.history)) history.value = state.history
+    const qstate = JSON.parse(localStorage.getItem(QUESTIONS_STORAGE) || '{}')
+    if (Array.isArray(qstate.questions)) managedQuestions.value = qstate.questions
+    if (Array.isArray(qstate.suggestions)) suggestions.value = qstate.suggestions
   } catch { /* Treat invalid local demo data as empty. */ }
   ticker = window.setInterval(() => {
     if (page.value === 'mock' && mockStarted.value && !isSubmitting.value) {
@@ -146,7 +208,8 @@ function setTask(number) {
   }
 }
 function startMock() {
-  const available = questionsFor(mockTask.value)
+  const available = questionsForTask(mockTask.value)
+  if (!available.length) { toast(`No active Task ${mockTask.value} questions are available in this demo.`); return }
   mockQuestion.value = available[Math.floor(Math.random() * available.length)]
   mockEssay.value = ''
   mockSeconds.value = (mockTask.value === 1 ? 20 : 40) * 60
@@ -172,11 +235,28 @@ function applyTimer() {
   toast(practiceTimerOn.value ? `A ${practiceTimerDuration.value}-minute practice countdown has started.` : 'Practice timer disabled.')
 }
 function useQuestion(item) {
-  practiceDraft.value.question = item.question
-  practiceDraft.value.visual = item.visual
-  practiceDraft.value.questionSource = 'bank'
+  // One workflow for both the modal (if enabled later) and the learner question bank.
+  if (!item || item.status !== 'active') return
+  if (revisionOf.value) {
+    toast('Finish or cancel your essay revision before selecting a different question.')
+    return
+  }
+  const chosenTask = Number(item.task)
+  if (![1, 2].includes(chosenTask)) return
+  practiceTask.value = chosenTask
+  practiceDrafts[chosenTask].question = item.question
+  practiceDrafts[chosenTask].visual = item.visual || null
+  practiceDrafts[chosenTask].questionSource = 'bank'
+  practiceDrafts[chosenTask].questionId = item.id
+  // Keep the learner's in-progress essay draft; choosing a question must not erase writing.
+  if (!practiceTimerOn.value) {
+    practiceTimerDuration.value = chosenTask === 1 ? 20 : 40
+    practiceSeconds.value = practiceTimerDuration.value * 60
+  }
   modal.value = ''
-  toast('Question added. You can edit it if needed.')
+  navigate('practice')
+  queuePersist()
+  toast(`Task ${chosenTask} question selected. Your existing essay draft has been preserved.`)
 }
 function acceptImage({ target, text, imageData }) {
   if (target === 'essay') {
@@ -186,6 +266,7 @@ function acceptImage({ target, text, imageData }) {
     if (text) practiceDraft.value.question = text
     if (imageData) practiceDraft.value.visual = imageData
     practiceDraft.value.questionSource = 'custom'
+    practiceDraft.value.questionId = null
   }
   importTarget.value = null
   toast('Imported content inserted. Review it before submitting.')
@@ -200,6 +281,7 @@ function clearDraft() {
     practiceDraft.value.question = ''
     practiceDraft.value.visual = null
     practiceDraft.value.questionSource = 'custom'
+    practiceDraft.value.questionId = null
   }
   modal.value = ''
   toast('Editor cleared.')
@@ -227,6 +309,7 @@ function submitEssay(reason = 'manual') {
   const next = {
     id: `demo-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
     mode, task: task.value, essay, question,
+    questionId: mode === 'mock' ? (mockQuestion.value?.id || null) : (practiceDraft.value.questionSource === 'bank' ? practiceDraft.value.questionId : null),
     visual: activeVisual.value || null,
     revisionNumber: parent ? parent.revisionNumber + 1 : 0,
     previousSubmissionId: parent ? parent.id : null,
@@ -291,7 +374,7 @@ function startRevision() {
   const current = activeResult.value
   if (!current || current.mode !== 'practice' || current.status !== 'demo') return
   practiceTask.value = current.task
-  practiceDrafts[current.task] = { question: current.question, essay: current.essay, visual: current.visual, questionSource: 'custom' }
+  practiceDrafts[current.task] = { question: current.question, essay: current.essay, visual: current.visual, questionSource: current.questionId ? 'bank' : 'custom', questionId: current.questionId || null }
   revisionOf.value = current
   practiceTimerOn.value = false
   practiceTimerDuration.value = current.task === 1 ? 20 : 40
@@ -330,8 +413,8 @@ const activeHistory = computed(() => [...history.value].sort((a, b) => new Date(
       <div class="header-right">
         <span class="prototype-pill"><span class="prototype-dot" />Frontend prototype</span>
         <span class="header-divider"/>
-        <div class="avatar" aria-hidden="true">S</div>
-        <span class="header-username">Student <ChevronDown :size="13" /></span>
+        <label class="qm-role-toggle"><UserRoundCog :size="15"/><span class="sr-only">Demo role</span><select :value="demoRole" @change="setDemoRole" aria-label="Choose demo role"><option value="student">Student demo</option><option value="admin">Admin demo</option></select></label>
+        <div class="avatar" aria-hidden="true">{{ demoRole === 'admin' ? 'A' : 'S' }}</div>
         <button class="mobile-menu-btn icon-button" aria-label="Toggle navigation" @click="showMobileMenu = !showMobileMenu"><Menu :size="22" /></button>
       </div>
     </header>
@@ -345,6 +428,14 @@ const activeHistory = computed(() => [...history.value].sort((a, b) => new Date(
           <button class="nav-link" :class="{ active: page === 'mock' }" @click="navigate('mock')"><FileText :size="18" />Take Mock Test</button>
           <button class="nav-link" :class="{ active: page === 'history' || page === 'result' }" @click="navigate('history')"><FileClock :size="18" />My Results <span v-if="history.length" class="nav-count">{{ history.length }}</span></button>
           <button class="nav-link" :class="{ active: page === 'progress' }" @click="navigate('progress')"><BarChart3 :size="18" />Progress Dashboard</button>
+          <div v-if="demoRole === 'student'" class="sidebar-section-label qm-admin-label">LEARNING</div>
+          <button v-if="demoRole === 'student'" class="nav-link" :class="{ active: page === 'question-bank' }" @click="navigate('question-bank')"><LibraryBig :size="18" />Question Bank</button>
+          <button v-if="demoRole === 'student'" class="nav-link" :class="{ active: page === 'question-suggestion' }" @click="navigate('question-suggestion')"><FilePlus2 :size="18" />Suggest a Question</button>
+          <template v-if="demoRole === 'admin'">
+            <div class="sidebar-section-label qm-admin-label">ADMINISTRATION</div>
+            <button class="nav-link" :class="{ active: page === 'question-bank' }" @click="navigate('question-bank')"><LibraryBig :size="18" />Question Bank</button>
+            <button class="nav-link" :class="{ active: page === 'suggestion-review' }" @click="navigate('suggestion-review')"><ShieldCheck :size="18" />Review Suggestions <span v-if="suggestions.some(s => s.status === 'pending')" class="nav-count">{{ suggestions.filter(s => s.status === 'pending').length }}</span></button>
+          </template>
         </nav>
         <div class="sidebar-bottom">
           <div class="sidebar-tip"><GraduationCap :size="19" /><strong>Your writing space</strong><p>Practise, review feedback, and keep improving — one essay at a time.</p></div>
@@ -390,13 +481,13 @@ const activeHistory = computed(() => [...history.value].sort((a, b) => new Date(
               <div class="section-heading">
                 <div class="section-title"><span class="step-number">01</span><h2 id="question-heading">Question</h2><span v-if="isMock && mockStarted" class="field-meta">Assigned question</span></div>
                 <div v-if="isPractice" class="section-actions">
-                  <button class="inline-action" @click="modal = 'bank'"><BookOpenText :size="16" /><span>Question bank</span></button>
+                  <button class="inline-action" @click="navigate('question-bank')"><BookOpenText :size="16" /><span>View Question Bank</span></button>
                   <button class="inline-action inline-action-red" @click="importTarget = 'question'"><ImagePlus :size="16" /><span>Extract from image</span></button>
                 </div>
               </div>
               <template v-if="isPractice">
                 <div class="question-field-wrap">
-                  <textarea v-model="practiceDraft.question" class="field question-textarea" placeholder="Type or paste your question here, or choose a question from the bank…" aria-label="Question prompt" @input="practiceDraft.questionSource = 'custom'" />
+                  <textarea v-model="practiceDraft.question" class="field question-textarea" placeholder="Type or paste your question here, or choose a question from the bank…" aria-label="Question prompt" @input="practiceDraft.questionSource = 'custom'; practiceDraft.questionId = null" />
                 </div>
                 <div v-if="practiceDraft.visual" class="question-visual-block">
                   <div class="visual-topline"><span><ImagePlus :size="15" /> Task 1 question material</span><div class="visual-actions"><button class="small-link" @click="modal = 'zoom'">Enlarge</button><button class="small-link danger" @click="practiceDraft.visual = null">Remove</button></div></div>
@@ -408,7 +499,7 @@ const activeHistory = computed(() => [...history.value].sort((a, b) => new Date(
               <template v-else>
                 <div v-if="mockStarted && mockQuestion" class="read-only-question">
                   <p class="question-content">{{ mockQuestion.question }}</p>
-                  <div v-if="mockQuestion.visual" class="question-visual-block mock-visual"><div class="visual-topline"><span>Provided Task 1 visual</span><button class="small-link" @click="modal = 'zoom'"><ZoomIn :size="14" />Enlarge</button></div><QuestionChart :variant="mockQuestion.visual" /></div>
+                  <div v-if="mockQuestion.visual" class="question-visual-block mock-visual"><div class="visual-topline"><span>Provided Task 1 visual</span><button class="small-link" @click="modal = 'zoom'"><ZoomIn :size="14" />Enlarge</button></div><QuestionChart v-if="!mockQuestion.visual.startsWith('data:')" :variant="mockQuestion.visual" /><img v-else :src="mockQuestion.visual" class="custom-question-image" alt="Task 1 prompt visual" /></div>
                 </div>
                 <div v-else class="empty-question"><FileText :size="24" /><span>Your randomly assigned Task {{ task }} question will appear here once the test begins.</span></div>
               </template>
@@ -449,6 +540,22 @@ const activeHistory = computed(() => [...history.value].sort((a, b) => new Date(
           <ProgressDashboard :history="history" @open-results="navigate('history')" />
         </template>
 
+        <template v-else-if="page === 'question-suggestion' && demoRole === 'student'">
+          <QuestionSuggestion :suggestions="suggestions" :known-questions="managedQuestions" @submit="submitQuestionSuggestion" @cancel="navigate('dashboard')" />
+        </template>
+
+        <template v-else-if="page === 'question-bank' && demoRole === 'student'">
+          <QuestionBankStudent :questions="activeBank" @use-question="useQuestion" @suggest-question="navigate('question-suggestion')" />
+        </template>
+
+        <template v-else-if="page === 'question-bank' && demoRole === 'admin'">
+          <QuestionBankAdmin :questions="managedQuestions" :suggestions="suggestions" :history="history" @save-question="saveManagedQuestion" @archive="archiveQuestion" @change-status="changeQuestionStatus" @open-review="navigate('suggestion-review')" />
+        </template>
+
+        <template v-else-if="page === 'suggestion-review' && demoRole === 'admin'">
+          <SuggestionReviewAdmin :suggestions="suggestions" :questions="managedQuestions" @approve="approveSuggestion" @reject="rejectSuggestion" @open-bank="navigate('question-bank')" />
+        </template>
+
         <template v-else-if="page === 'history'">
           <section class="page-header"><div><p class="eyebrow">YOUR WORK / HISTORY</p><h1>My Results</h1><p class="page-subtitle">Review locally saved demo submissions and their assessments.</p></div><div class="button-cluster"><button class="btn btn-outline" @click="viewExampleResult"><FileText :size="16"/>Preview sample result</button><button class="btn btn-primary" @click="goToWriting('practice')"><SquarePen :size="16"/>New practice</button></div></section>
           <section class="history-list" v-if="activeHistory.length"><button v-for="item in activeHistory" :key="item.id" class="history-entry" @click="openHistoryResult(item)"><span class="history-icon"><FileText :size="20" /></span><span class="history-main"><strong>{{ item.mode === 'mock' ? 'Mock Test' : 'Practice Writing' }} · Task {{ item.task }}<span v-if="item.revisionNumber"> · Revision {{ item.revisionNumber }}</span></strong><span>{{ item.question.slice(0, 125) }}{{ item.question.length > 125 ? '…' : '' }}</span><small>{{ new Date(item.submittedAt).toLocaleString() }} · {{ wordCount(item.essay) }} words</small></span><span class="history-score">{{ item.status === 'demo' ? `Demo ${item.scores.overall.toFixed(1)}` : item.status === 'pending' ? 'Pending' : 'No score' }}</span><ArrowRight :size="17" /></button></section>
@@ -472,11 +579,7 @@ const activeHistory = computed(() => [...history.value].sort((a, b) => new Date(
       <template #footer><button class="btn btn-quiet" @click="modal = ''">Cancel</button><button class="btn btn-primary" @click="applyTimer"><Check :size="16" />Save settings</button></template>
     </ModalShell>
 
-    <ModalShell v-if="modal === 'bank'" title="Choose a Question" wide @close="modal = ''">
-      <p class="muted small">These are example questions for the frontend prototype, not an official IELTS question bank. Select one to populate the editor.</p>
-      <div class="bank-list"><button v-for="item in questionsFor(practiceTask)" :key="item.id" class="bank-item" @click="useQuestion(item)"><span class="bank-item-icon"><BookOpenText :size="19" /></span><span><small>{{ item.topic }} · Task {{ item.task }}</small><strong>{{ item.title }}</strong><span>{{ item.question.slice(0, 130) }}…</span></span><ArrowRight :size="17" /></button></div>
-      <template #footer><button class="btn btn-outline" @click="modal = ''">Cancel</button></template>
-    </ModalShell>
+
 
     <ModalShell v-if="modal === 'clear'" title="Clear the Editor?" @close="modal = ''"><p>This will remove your current text{{ revisionOf ? '' : ' and question' }} from the practice editor. Saved submissions are not affected.</p><template #footer><button class="btn btn-quiet" @click="modal = ''">Keep writing</button><button class="btn btn-primary" @click="clearDraft"><Trash2 :size="16"/>Clear editor</button></template></ModalShell>
 
